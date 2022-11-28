@@ -141,8 +141,10 @@ class Trainer:
     
     
     def log(self, loss, X, Xh, **kwargs):
+        if self.local_rank != 0:
+            return
         self.logger.add_scalar('Train/Loss', loss.item(), self.global_steps)
-        if self.batch_steps % self.config['refresh_rate'] == 0 and self.local_rank == 0:
+        if self.batch_steps % self.config['refresh_rate'] == 0:
             x0 = X[0].detach().cpu()
             xh0 = Xh[0].detach().cpu()
             image = torch.cat([x0, xh0], dim=-1)
