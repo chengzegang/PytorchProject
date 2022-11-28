@@ -40,12 +40,16 @@ class Trainer:
         if dist.is_available() and dist.is_initialized():
             self.local_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
-            
+    
+    @property
+    def device(self):
+        return torch.device('cuda', self.local_rank)
     
     @property
     def model(self):
         if self._model is None:
             self._model = RectVit(**self.config)
+        self._model.to(self.device)
         if dist.is_available() and dist.is_initialized():
             self._model = DistributedDataParallel(self._model, device_ids=[self.local_rank], output_device=self.local_rank)
         return self._model
@@ -147,7 +151,7 @@ class Trainer:
             print(f'Epoch: {self.curr_epoch}, Batch: {self.batch_steps}, Loss: {loss.item()}')
     
     def train(self):
-        self.model.train().to('cuda')
+        self.model.train().to(self.device)
 
         optimizer, scheduler = self.init_optims()
         
@@ -158,7 +162,7 @@ class Trainer:
             
             for self.batch_steps, X in enumerate(self.dataloader):
                 
-                X = X.to('cuda')
+                X = X.to(self.device)
                 Xh = self.model(X)
                 optimizer.zero_grad()
                 loss = F.mse_loss(X, Xh)
