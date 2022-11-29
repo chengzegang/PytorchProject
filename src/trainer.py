@@ -70,6 +70,7 @@ class Trainer:
                 else max([int(version) for version in existing_versions]) + 1
             )
             self._logdir = os.path.join(logdir, "version_" + str(my_version))
+            Path(self._logdir).mkdir(parents=True, exist_ok=True)
         return self._logdir
     
     @property
