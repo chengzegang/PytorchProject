@@ -13,9 +13,9 @@ import torch.distributed as dist
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-import math
 from functools import partial
 from pathlib import Path
+from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 
 class Trainer:
@@ -37,6 +37,7 @@ class Trainer:
         self.world_size = 1
         self.global_steps = 0
         self.batch_steps = 0
+        self.start_time = datetime.now()
         if dist.is_available() and dist.is_initialized():
             self.local_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
@@ -112,14 +113,14 @@ class Trainer:
         )
         
     @property
-    def transforms(self):
-        transforms_ = T.Compose([
+    def transform(self):
+        transform_ = T.Compose([
             T.Resize(self.config['image_size']),
             T.CenterCrop(self.config['image_size']),
             T.ToTensor(),
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
-        return transforms_
+        return transform_
 
     def inverse_normalize(self, x: torch.Tensor):
         x = TF.normalize(x,  [-0.485/0.229, -0.456/0.224, -0.406/0.225], [1/0.229, 1/0.224, 1/0.225])
@@ -130,7 +131,7 @@ class Trainer:
     @property
     def dataset(self):
         if self._dataset is None:
-            self._dataset = datasets.ImageFolder(self.config['dataset_dir'], transforms=self.transforms)
+            self._dataset = datasets.ImageFolder(self.config['dataset_dir'], transform=self.transform)
         return self._dataset
     
     
@@ -141,7 +142,7 @@ class Trainer:
         torch.save(self.model.state_dict(), ckpt_path)
     
     
-    def log(self, loss, X, Xh, **kwargs):
+    def log(self, loss, X, Xh, curr_lr, **kwargs):
         if self.local_rank != 0:
             return
         self.logger.add_scalar('Train/Loss', loss.item(), self.global_steps)
@@ -151,20 +152,34 @@ class Trainer:
             image = torch.cat([x0, xh0], dim=-1)
             image = self.inverse_normalize(image)
             self.logger.add_image('Train/Image', image, self.global_steps)
-            print(f'Epoch: {self.curr_epoch}, Batch: {self.batch_steps}, Loss: {loss.item()}')
+
+            elapsed_time = 'N/A'
+            finish_time = 'N/A'
+            if self.global_steps > 0:
+                curr_time = datetime.now()
+                elapsed_time = curr_time - self.start_time
+                time_per_step = elapsed_time / self.global_steps
+                total_time = time_per_step * self.total_steps
+                finish_time = curr_time + total_time
+
+                elapsed_time = str(elapsed_time).split('.')[0]
+                finish_time = str(finish_time).split('.')[0]
+
+
+            print(f'Epoch: {self.curr_epoch}, Batch: {self.batch_steps}, Loss: {loss.item():.4f}, LR: {curr_lr:.2e}, Time: {elapsed_time}, ETA: {finish_time}', flush=True)
     
     def train(self):
         self.model.train().to(self.device)
 
         optimizer, scheduler = self.init_optims()
         
-        for self.curr_epoch in range(self.config['max_epochs']):
-            
+        for ep in range(self.config['max_epochs']):
+            self.curr_epoch = ep
             if dist.is_available() and dist.is_initialized():
                 self.sampler.set_epoch(self.curr_epoch)
             
-            for self.batch_steps, X in enumerate(self.dataloader):
-                
+            for batch_idx, X in enumerate(self.dataloader):
+                self.batch_steps = batch_idx
                 X = X.to(self.device)
                 Xh = self.model(X)
                 optimizer.zero_grad()
@@ -172,7 +187,8 @@ class Trainer:
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
-                self.log(loss, X, Xh)
+                curr_lr = scheduler.get_last_lr()[0]
+                self.log(loss, X, Xh, curr_lr)
                 self.global_steps += 1
             
             self.checkpoint()

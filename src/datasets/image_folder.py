@@ -8,18 +8,19 @@ import os
 class ImageFolder(Dataset):
     
     
-    def __init__(self, folder: str, transforms: Callable | None = None, exts: Tuple[str] = ('jpeg', 'png', 'jpg')) -> None:
+    def __init__(self, folder: str, transform: Callable | None = None, exts: Tuple[str] = ('jpeg', 'png', 'jpg')) -> None:
         super().__init__()
         self.folder = folder
-        self.transforms = transforms
+        self.transform = transform
         self._path = None
         self.exts = exts
     
     @property
     def path(self):
         if self._path is None:
+            self._path = []
             for root, _, files in os.walk(self.folder):
-                self._path = [Path(os.path.join(root, file)).absolute().resolve().as_posix() for file in files if file.lower().endswith(self.exts)]
+                self._path.extend([Path(os.path.join(root, file)).absolute().resolve().as_posix() for file in files if file.lower().endswith(self.exts)])
         return self._path
     
     def __len__(self):
@@ -27,6 +28,6 @@ class ImageFolder(Dataset):
     
     def __getitem__(self, idx: int):
         image = Image.open(self.path[idx]).convert('RGB')
-        if self.transforms is not None:
-            image = self.transforms(image)
+        if self.transform is not None:
+            image = self.transform(image)
         return image
