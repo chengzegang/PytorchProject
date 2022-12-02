@@ -33,6 +33,7 @@ class Trainer:
         self._logger = None
         self.curr_epoch = None
         self._sampler = None
+        self._steps_per_batch = None
         self.local_rank = 0
         self.world_size = 1
         self.global_steps = 0
@@ -75,8 +76,14 @@ class Trainer:
         return self._logdir
     
     @property
+    def steps_per_batch(self):
+        if self._steps_per_batch is None:
+            self._steps_per_batch = len(self.dataloader)
+        return self._steps_per_batch
+
+    @property
     def total_steps(self):
-        return len(self.dataloader) * self.config['max_epochs']
+        return self.steps_per_batch * self.config['max_epochs']
     
     @property
     def logger(self):
@@ -88,7 +95,7 @@ class Trainer:
     def init_optims(self) -> Tuple[Optimizer, _LRScheduler]:
         
         optimizer = AdamW(self.model.parameters(), lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
-        scheduler = LambdaLR(optimizer, partial(lr_lambda.cosine_warmup_lr_lambda, 0, self.config['warmup_epochs'], self.total_steps))
+        scheduler = LambdaLR(optimizer, partial(lr_lambda.cosine_warmup_lr_lambda, 0, self.config['warmup_epochs'] * self.steps_per_batch, self.total_steps))
         return optimizer, scheduler
     
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
