@@ -53,7 +53,7 @@ class Trainer:
             self._model = RectVit(**self.config)
             self._model.to(self.device)
             if dist.is_available() and dist.is_initialized():
-                self._model = DistributedDataParallel(self._model, device_ids=[self.local_rank], output_device=self.local_rank)
+                self._model = DistributedDataParallel(self._model, device_ids=[self.local_rank])
         return self._model
     
     @property
