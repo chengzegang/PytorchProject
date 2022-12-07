@@ -176,7 +176,7 @@ class Trainer:
             ax[1].imshow(self.inverse_normalize(yh0).permute(1, 2, 0))
             ax[1].set_title('Prediction')
             self.logger.add_figure('Train/Image', fig, self.global_steps)
-            fig.close()
+            plt.close(fig)
             elapsed_time = 'N/A'
             finish_time = 'N/A'
             if self.global_steps > 0:
