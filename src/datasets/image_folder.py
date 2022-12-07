@@ -8,10 +8,11 @@ import os
 class ImageFolder(Dataset):
     
     
-    def __init__(self, folder: str, transform: Callable | None = None, exts: Tuple[str] = ('jpeg', 'png', 'jpg')) -> None:
+    def __init__(self, folder: str, transform: Callable | None = None, target_transform: Callable = None, exts: Tuple[str] = ('jpeg', 'png', 'jpg')) -> None:
         super().__init__()
         self.folder = folder
         self.transform = transform
+        self.target_transform = target_transform
         self._path = None
         self.exts = exts
     
@@ -28,6 +29,9 @@ class ImageFolder(Dataset):
     
     def __getitem__(self, idx: int):
         image = Image.open(self.path[idx]).convert('RGB')
+        target = image
         if self.transform is not None:
             image = self.transform(image)
-        return image
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return image, target

@@ -21,7 +21,8 @@ class PatchEmbedding(nn.Module):
         self.patch_embedding = nn.Conv2d(3, hidden_size, kernel_size=patch_size, stride=patch_size, bias=False)
         
         self.positional_embedding = nn.Embedding(num_patches, hidden_size)
-        self.positional_ids = Parameter(torch.arange(num_patches).expand((1, -1)), requires_grad=False)
+        positional_ids = torch.arange(num_patches).expand((1, -1))
+        self.register_buffer("positional_ids", positional_ids)
         
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -46,7 +47,7 @@ class VisionTransformer(nn.Module):
         super().__init__()
         
         self.patch_embedding = PatchEmbedding(image_size, patch_size, hidden_size)
-        self.layers = nn.TransformerEncoder(nn.TransformerEncoderLayer(hidden_size, num_heads, intermediate_size, dropout, acitvate_fn), num_layers)
+        self.layers = nn.TransformerEncoder(nn.TransformerEncoderLayer(hidden_size, num_heads, intermediate_size, dropout, acitvate_fn, batch_first=True), num_layers)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         
@@ -72,10 +73,10 @@ class RectVit(nn.Module):
         self.image_size = image_size
         self.patch_size = patch_size
         self.encoder = VisionTransformer(image_size, patch_size, num_encoder_layers, num_heads, hidden_size, intermediate_size, dropout, acitvate_fn)
-        self.decoder = nn.TransformerEncoder(nn.TransformerEncoderLayer(hidden_size, num_heads, intermediate_size, dropout, acitvate_fn), num_decoder_layers)
+        self.decoder = nn.TransformerEncoder(nn.TransformerEncoderLayer(hidden_size, num_heads, intermediate_size, dropout, acitvate_fn, batch_first=True), num_decoder_layers)
         self.projector = nn.Linear(hidden_size, patch_size ** 2 * 3)
     
-    def reconstruction(self, x: torch.Tensor) -> torch.Tensor:
+    def rect(self, x: torch.Tensor) -> torch.Tensor:
         x = x.transpose(-1, -2)
         x = F.fold(
             x,
@@ -90,7 +91,7 @@ class RectVit(nn.Module):
         x = self.encoder(x)
         x = self.decoder(x)
         x = self.projector(x)
-        x = self.reconstruction(x)
+        x = self.rect(x)
         
         return x
     

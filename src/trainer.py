@@ -1,7 +1,7 @@
 
 import torch
 from .utils import lr_lambda
-from .nn import RectVit
+from . import nn
 from torch.optim import Optimizer, AdamW
 from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
 from typing import Tuple
@@ -14,7 +14,9 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 from functools import partial
+import matplotlib.pyplot as plt
 from pathlib import Path
+from torch.distributed.optim import ZeroRedundancyOptimizer
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 
@@ -50,7 +52,7 @@ class Trainer:
     @property
     def model(self):
         if self._model is None:
-            self._model = RectVit(**self.config)
+            self._model = nn.RectVit(**self.config)
             self._model.to(self.device)
             if dist.is_available() and dist.is_initialized():
                 self._model = DistributedDataParallel(self._model, device_ids=[self.local_rank])
@@ -93,8 +95,10 @@ class Trainer:
     
     
     def init_optims(self) -> Tuple[Optimizer, _LRScheduler]:
-        
-        optimizer = AdamW(self.model.parameters(), lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
+        if dist.is_available() and dist.is_initialized():
+            optimizer = ZeroRedundancyOptimizer(self.model.parameters(), AdamW, lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
+        else:
+            optimizer = AdamW(self.model.parameters(), lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
         scheduler = LambdaLR(optimizer, partial(lr_lambda.cosine_warmup_lr_lambda, 0, self.config['warmup_epochs'] * self.steps_per_batch, self.total_steps))
         return optimizer, scheduler
     
@@ -121,13 +125,22 @@ class Trainer:
         
     @property
     def transform(self):
-        transform_ = T.Compose([
+        return T.Compose([
             T.Resize(self.config['image_size']),
             T.CenterCrop(self.config['image_size']),
             T.ToTensor(),
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
-        return transform_
+
+    
+    @property
+    def target_transform(self):
+        return T.Compose([
+            T.Resize(self.config['image_size']),
+            T.CenterCrop(self.config['image_size']),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
 
     def inverse_normalize(self, x: torch.Tensor):
         x = TF.normalize(x,  [-0.485/0.229, -0.456/0.224, -0.406/0.225], [1/0.229, 1/0.224, 1/0.225])
@@ -138,7 +151,7 @@ class Trainer:
     @property
     def dataset(self):
         if self._dataset is None:
-            self._dataset = datasets.ImageFolder(self.config['dataset_dir'], transform=self.transform)
+            self._dataset = datasets.ImageFolder(self.config['dataset_dir'], transform=self.transform, target_transform=self.target_transform)
         return self._dataset
     
     
@@ -149,16 +162,20 @@ class Trainer:
         torch.save(self.model.state_dict(), ckpt_path)
     
     
-    def log(self, loss, X, Xh, curr_lr, **kwargs):
+    def log(self, loss, y, yh, curr_lr, **kwargs):
         if self.local_rank != 0:
             return
         self.logger.add_scalar('Train/Loss', loss.item(), self.global_steps)
         if self.batch_steps % self.config['refresh_rate'] == 0:
-            x0 = X[0].detach().cpu()
-            xh0 = Xh[0].detach().cpu()
-            image = torch.cat([x0, xh0], dim=-1)
-            image = self.inverse_normalize(image)
-            self.logger.add_image('Train/Image', image, self.global_steps)
+            y0 = y[0].detach().cpu()
+            yh0 = yh[0].detach().cpu()
+            
+            fig, ax = plt.subplots(1, 2, figsize=(20, 20))
+            ax[0].imshow(self.inverse_normalize(y0).permute(1, 2, 0))
+            ax[0].set_title('Ground Truth')
+            ax[1].imshow(self.inverse_normalize(yh0).permute(1, 2, 0))
+            ax[1].set_title('Prediction')
+            self.logger.add_figure('Train/Image', fig, self.global_steps)
 
             elapsed_time = 'N/A'
             finish_time = 'N/A'
@@ -174,7 +191,6 @@ class Trainer:
 
 
             print(f'Epoch: {self.curr_epoch}, Batch: {self.batch_steps}, Loss: {loss.item():.4f}, LR: {curr_lr:.2e}, Time: {elapsed_time}, ETA: {finish_time}', flush=True)
-    
     def train(self):
         self.model.train().to(self.device)
 
@@ -185,17 +201,18 @@ class Trainer:
             if dist.is_available() and dist.is_initialized():
                 self.sampler.set_epoch(self.curr_epoch)
             
-            for batch_idx, X in enumerate(self.dataloader):
+            for batch_idx, (X, y) in enumerate(self.dataloader):
                 self.batch_steps = batch_idx
                 X = X.to(self.device)
-                Xh = self.model(X)
+                y = y.to(self.device)
+                yh = self.model(X)
                 optimizer.zero_grad()
-                loss = F.mse_loss(X, Xh)
+                loss = F.mse_loss(y, yh)
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
                 curr_lr = scheduler.get_last_lr()[0]
-                self.log(loss, X, Xh, curr_lr)
+                self.log(loss, y, yh, curr_lr)
                 self.global_steps += 1
             
             self.checkpoint()
