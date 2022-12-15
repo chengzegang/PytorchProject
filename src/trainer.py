@@ -198,3 +198,6 @@ class Trainer:
                 finish_time = str(finish_time).split('.')[0]
 
             print(f'Epoch: {self.curr_epoch}, Batch: {self.batch_steps}, Loss: {loss.item():.4f}, LR: {curr_lr:.2e}, Time: {elapsed_time}, ETA: {finish_time}', flush=True)
+
+            if self.global_steps > self.config['limit']:
+                return
