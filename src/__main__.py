@@ -23,6 +23,9 @@ if __name__ == '__main__':
     parser.add_argument('--refresh-rate', type=int, default=100, dest='refresh_rate')
     parser.add_argument('--ddp', action='store_true', dest='ddp')
     parser.add_argument('--port', type=int, default=35532, dest='port')
+    parser.add_argument('--zero', type=int, default=42, dest='zero')
+
+    parser.add_argument('--limit', type=int, help='limit the total number of iterations before early stop.', dest='limit')
 
     sys_argv = parser.parse_args()
     sys_argv = sys_argv.__dict__

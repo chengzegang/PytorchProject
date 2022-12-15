@@ -5,6 +5,7 @@ from typing import Callable
 from pathlib import Path
 from PIL import Image
 import os
+import pandas as pd
 class ImageFolder(Dataset):
     
     
@@ -13,22 +14,23 @@ class ImageFolder(Dataset):
         self.folder = folder
         self.transform = transform
         self.target_transform = target_transform
-        self._path = None
+        self._paths = None
         self.exts = exts
     
     @property
-    def path(self):
-        if self._path is None:
-            self._path = []
+    def paths(self):
+        if self._paths is None:
+            _paths = []
             for root, _, files in os.walk(self.folder):
-                self._path.extend([Path(os.path.join(root, file)).absolute().resolve().as_posix() for file in files if file.lower().endswith(self.exts)])
-        return self._path
+                _paths.extend([Path(os.path.join(root, file)).absolute().resolve().as_posix() for file in files if file.lower().endswith(self.exts)])
+            self._paths = pd.DataFrame({'path': _paths})
+        return self._paths
     
     def __len__(self):
-        return len(self.path)
+        return self.paths.shape[0]
     
     def __getitem__(self, idx: int):
-        image = Image.open(self.path[idx]).convert('RGB')
+        image = Image.open(self.paths.iloc[idx].item()).convert('RGB')
         target = image
         if self.transform is not None:
             image = self.transform(image)

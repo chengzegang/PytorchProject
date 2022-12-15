@@ -1,6 +1,6 @@
 
 import torch
-from .utils import lr_lambda
+from . import utils
 from . import nn
 from torch.optim import Optimizer, AdamW
 from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
@@ -26,6 +26,7 @@ class Trainer:
     def __init__(self, config: dict, **kwargs) -> None:
         self.config = config
         
+        self._device = None
         self._dataset = None
         self._model = None
         self._optimizer = None
@@ -36,19 +37,33 @@ class Trainer:
         self.curr_epoch = None
         self._sampler = None
         self._steps_per_batch = None
+        self.steps_per_batch = None
+        self.total_steps = None
+
+
         self.local_rank = 0
         self.world_size = 1
         self.global_steps = 0
         self.batch_steps = 0
+
+
         self.start_time = datetime.now()
+
         if dist.is_available() and dist.is_initialized():
             self.local_rank = dist.get_rank()
             self.world_size = dist.get_world_size()
+        
+        print(f'{str( self.start_time).split(".")[0]}: Process rank {self.local_rank} of {self.world_size} is running', flush=True)
     
     @property
     def device(self):
-        return torch.device('cuda', self.local_rank)
-    
+        if self._device is None:
+            if torch.cuda.is_available():
+                self._device = torch.device('cuda', self.local_rank)
+            else:
+                self._device = torch.device('cpu')
+        return self._device
+
     @property
     def model(self):
         if self._model is None:
@@ -76,36 +91,12 @@ class Trainer:
             self._logdir = os.path.join(logdir, "version_" + str(my_version))
             Path(self._logdir).mkdir(parents=True, exist_ok=True)
         return self._logdir
-    
-    @property
-    def steps_per_batch(self):
-        if self._steps_per_batch is None:
-            self._steps_per_batch = len(self.dataloader)
-        return self._steps_per_batch
 
-    @property
-    def total_steps(self):
-        return self.steps_per_batch * self.config['max_epochs']
-    
     @property
     def logger(self):
         if self._logger is None and self.local_rank == 0:
             self._logger = SummaryWriter(self.logdir)
         return self._logger
-    
-    
-    def init_optims(self) -> Tuple[Optimizer, _LRScheduler]:
-        if dist.is_available() and dist.is_initialized():
-            optimizer = ZeroRedundancyOptimizer(self.model.parameters(), AdamW, lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
-        else:
-            optimizer = AdamW(self.model.parameters(), lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
-        scheduler = LambdaLR(optimizer, partial(lr_lambda.cosine_warmup_lr_lambda, 0, self.config['warmup_epochs'] * self.steps_per_batch, self.total_steps))
-        return optimizer, scheduler
-    
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        self.model.eval()
-        with torch.no_grad():
-            return self.model(x)
     
     @property
     def sampler(self):
@@ -115,52 +106,69 @@ class Trainer:
     
     @property
     def dataloader(self):
-        return DataLoader(
+        _dataloader = DataLoader(
             self.dataset,
             batch_size=self.config['batch_size'],
             shuffle=(self.sampler is None),
             sampler=self.sampler,
             num_workers=self.config['num_workers'],
         )
-        
-    @property
-    def transform(self):
-        return T.Compose([
-            T.Resize(self.config['image_size']),
-            T.CenterCrop(self.config['image_size']),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
+        self.steps_per_batch = len(_dataloader)
+        self.total_steps = self.steps_per_batch * self.config['max_epochs']
+        return _dataloader
 
-    
-    @property
-    def target_transform(self):
-        return T.Compose([
-            T.Resize(self.config['image_size']),
-            T.CenterCrop(self.config['image_size']),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
-
-    def inverse_normalize(self, x: torch.Tensor):
-        x = TF.normalize(x,  [-0.485/0.229, -0.456/0.224, -0.406/0.225], [1/0.229, 1/0.224, 1/0.225])
-        x = x.clamp(0, 1)
-        return x
-        
-        
     @property
     def dataset(self):
         if self._dataset is None:
-            self._dataset = datasets.ImageFolder(self.config['dataset_dir'], transform=self.transform, target_transform=self.target_transform)
+            self._dataset = datasets.ImageFolder(self.config['dataset_dir'], transform=utils.get_transform(self.config), target_transform=utils.get_target_transform(self.config))
         return self._dataset
     
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        self.model.eval()
+        with torch.no_grad():
+            return self.model(x)
+
+    def train(self):
+        self.model.train().to(self.device)
+        dataloader = self.dataloader
+        optimizer, scheduler = self.init_optims()
+        
+        for ep in range(self.config['max_epochs']):
+            self.curr_epoch = ep
+            if dist.is_available() and dist.is_initialized():
+                self.sampler.set_epoch(self.curr_epoch)
+            
+            for idx, (X, y) in enumerate(dataloader):
+                self.batch_steps = idx
+                X = X.to(self.device)
+                y = y.to(self.device)
+                yh = self.model(X)
+                optimizer.zero_grad()
+                loss = F.mse_loss(y, yh)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                curr_lr = scheduler.get_last_lr()[0]
+
+                if self.local_rank == 0 and self.global_steps % self.config['refresh_rate'] == 0:
+                    self.log(loss, y, yh, curr_lr)
+                    self.checkpoint()
+                self.global_steps += 1
+
+    def init_optims(self) -> Tuple[Optimizer, _LRScheduler]:
+        if dist.is_available() and dist.is_initialized() and self.config['zero']:
+            optimizer = ZeroRedundancyOptimizer(self.model.parameters(), AdamW, lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
+        else:
+            optimizer = AdamW(self.model.parameters(), lr=self.config['lr'], betas=self.config['betas'], weight_decay=self.config['weight_decay'])
+        scheduler = LambdaLR(optimizer, partial(utils.cosine_warmup_lr_lambda, 0, self.config['warmup_epochs'] * self.steps_per_batch, self.total_steps))
+        return optimizer, scheduler
     
     def checkpoint(self):
         ckpt_dir = Path(self.logdir) / "checkpoints"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         ckpt_path = ckpt_dir / f"epoch_{self.curr_epoch}.pth"
         torch.save(self.model.state_dict(), ckpt_path)
-    
+
     
     def log(self, loss, y, yh, curr_lr, **kwargs):
         if self.local_rank != 0:
@@ -171,9 +179,9 @@ class Trainer:
             yh0 = yh[0].detach().cpu()
             
             fig, ax = plt.subplots(1, 2, figsize=(20, 20))
-            ax[0].imshow(self.inverse_normalize(y0).permute(1, 2, 0))
+            ax[0].imshow(utils.inverse_normalize(y0).permute(1, 2, 0))
             ax[0].set_title('Ground Truth')
-            ax[1].imshow(self.inverse_normalize(yh0).permute(1, 2, 0))
+            ax[1].imshow(utils.inverse_normalize(yh0).permute(1, 2, 0))
             ax[1].set_title('Prediction')
             self.logger.add_figure('Train/Image', fig, self.global_steps)
             plt.close(fig)
@@ -189,30 +197,4 @@ class Trainer:
                 elapsed_time = str(elapsed_time).split('.')[0]
                 finish_time = str(finish_time).split('.')[0]
 
-
             print(f'Epoch: {self.curr_epoch}, Batch: {self.batch_steps}, Loss: {loss.item():.4f}, LR: {curr_lr:.2e}, Time: {elapsed_time}, ETA: {finish_time}', flush=True)
-    def train(self):
-        self.model.train().to(self.device)
-
-        optimizer, scheduler = self.init_optims()
-        
-        for ep in range(self.config['max_epochs']):
-            self.curr_epoch = ep
-            if dist.is_available() and dist.is_initialized():
-                self.sampler.set_epoch(self.curr_epoch)
-            
-            for batch_idx, (X, y) in enumerate(self.dataloader):
-                self.batch_steps = batch_idx
-                X = X.to(self.device)
-                y = y.to(self.device)
-                yh = self.model(X)
-                optimizer.zero_grad()
-                loss = F.mse_loss(y, yh)
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                curr_lr = scheduler.get_last_lr()[0]
-                self.log(loss, y, yh, curr_lr)
-                self.global_steps += 1
-            
-            self.checkpoint()
